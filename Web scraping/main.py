@@ -1,88 +1,164 @@
 import httpx
 from selectolax.parser import HTMLParser
 import csv
-url ='https://www.rei.com/c/camping-and-hiking/f/scd-deals'
-headers={"User-Agent":'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
-resp = httpx.get(url,headers=headers)
-html = HTMLParser(resp.text)
+import time
+from urllib.parse import urljoin
+from dataclasses import dataclass , asdict ,fields
+from typing import Optional
+import json
 
+@dataclass
+class Product:
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    product_brand: Optional[str] = None
+    rating: Optional[float] = None
+    no_of_reviews: Optional[int] = None
+    current_price: Optional[float] = None
+    original_price: Optional[float] = None
 
-# Dictionary to store product names and prices
-products = {}
+def get_html(url):
+    headers = {
+        "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+    }
+    try:
+        response = httpx.get(url, headers=headers, timeout=10.0)  # Set a timeout for the request
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+        return HTMLParser(response.text)
+    except httpx.RequestError as e:
+        print(f"Request error occurred: {e}")
+        return None
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP error occurred: {e.response.status_code}")
+        return None
 
-def get_price_details(product):
-    # Initialize the dictionary to store price details
-    price_details = {'price': None, 'status': None}
-    
-    # Handle price range or single price
-    full_price_tag = product.css_first('span[data-ui="full-price"]')
-    if full_price_tag:
-        full_price = full_price_tag.text().strip()
-        price_details['price'] = full_price
-        if '-' in full_price:
-            price_details['status'] = 'Price Range'
+# Find all product elements 
+def parse_products_url(html):
+    # Iterate over all product elements
+    for product in html.css('li.VcGDfKKy_dvNbxUqm29K'):
+        # Get the product URL
+        product_url = product.css_first('a').attributes['href']
+        if product_url:
+            product_url = urljoin('https://www.rei.com', product_url)
+            yield product_url
         else:
-            price_details['status'] = 'Single Price'
+            break
 
-    # Handle sale price, savings, and comparison price
-    sale_price_tag = product.css_first('span[data-ui="sale-price"]')
-    if sale_price_tag:
-        sale_price = sale_price_tag.text().strip()
-        compare_price_tag = product.css_first('span[data-ui="compare-at-price"]')
-        savings_tag = product.css_first('div[data-ui="savings-percent-variant2"]')
-        if compare_price_tag:
-            compare_price = compare_price_tag.text().strip()
-            savings = savings_tag.text().strip() if savings_tag else 'No savings info'
-            price_details['price'] = f"Sale: {sale_price}, Originally: {compare_price}, Savings: {savings}"
-            price_details['status'] = 'Sale Price'
+def parse_pages_products_urls(page_url):
+    page_number = 1
+    while True:
+        if page_number == 1:
+            url = page_url
         else:
-            full_price = full_price_tag.text().strip()
-            price_details['price'] = f"Sale: {sale_price}, Originally: {full_price}"    
-            price_details['status'] = 'Sale Price (unknown savings %)'
+             url = f"{page_url}?page={page_number}"      
 
-    return price_details
+        print(f"Fetching: {url}")
 
-# Find all product elements (assuming each product is in a <li> tag as shown)
-for product in html.css('li.VcGDfKKy_dvNbxUqm29K'):
-    # Extracting the product name
-    name_tag = product.css('h2.dBj29YaudGjV80UCeSh_')
-    if name_tag:
-        brand = name_tag[0].css('span.nL0nEPe34KFncpRNS29I')[0].text().strip() if name_tag[0].css('span.nL0nEPe34KFncpRNS29I') else ''
-        title = name_tag[0].css('span.Xpx0MUGhB7jSm5UvK2EY')[0].text().strip() if name_tag[0].css('span.Xpx0MUGhB7jSm5UvK2EY') else ''
-        product_name = f"{brand} {title}"
+        html = get_html(url)
+        if html is None:
+            print("Failed to fetch page or last page reached")
+            break
+        productsUrls = list(parse_products_url(html))
+
+        if not productsUrls:
+            print("No more products urls found.")
+            break  
+        for product_url in productsUrls:
+            yield product_url
+       # time.sleep(1)  # Wait before fetching the next page
+        page_number += 1
+
+def get_product_data(html: HTMLParser, selector: str):
+    try:
+        # Extract the text and replace HTML entities
+        text = html.css_first(selector).text()
+        text = text.replace('\xa0', '').replace('&nbsp;', '')  # Replace non-breaking spaces
+        return text.strip()
+    except AttributeError:
+        return None
     
-     # Initialize pricing information
-    price = None
-    price_status = None
+def clean_data(data, str_remove=None):
+    strs_to_remove = ['$', '#', 'Item']
+    if str_remove:
+        strs_to_remove.append(str_remove)
+    for str in strs_to_remove:
+        if str in data:
+            data = data.replace(str, '')
+    return data
 
-    # Check for different types of pricing information
-    if product.css('span[data-ui="full-price"]'):
-        price = product.css('span[data-ui="full-price"]')[0].text().strip()
-        price_status = "Price Range" if "-" in price else "Single Price"
 
-    # Check for sale price
-    if product.css('span[data-ui="sale-price"]'):
-        sale_price = product.css('span[data-ui="sale-price"]')[0].text().strip()
-        original_price = product.css('span[data-ui="compare-at-price"]')[0].text().strip() if product.css('span[data-ui="compare-at-price"]') else None
-        savings = product.css('div[data-ui="savings-percent-variant2"]')[0].text().strip() if product.css('div[data-ui="savings-percent-variant2"]') else None
-        price = f"Sale: {sale_price}, Originally: {original_price}, Savings: {savings}"
-        price_status = "Sale Price"
+def parse_product_page(html):
+    product = Product()
+    product.product_id = int(clean_data(get_product_data(html, 'span#product-item-number')))
+    product.product_brand = get_product_data(html, 'a#product-brand-link')
+    product.product_name = clean_data(get_product_data(html, 'h1#product-page-title'),product.product_brand)
+    product.rating = float(get_product_data(html, '.cdr-rating__number_15-0-0'))
+    product.no_of_reviews = int(get_product_data(html, '.cdr-rating__count_15-0-0 > span:nth-of-type(2)'))
+   
+    # Extract and process current price
+    current_price_text = get_product_data(html, 'span.price-value.price-value--sale')
+    if current_price_text:
+        try:
+            product.current_price = float(clean_data(current_price_text))
+        except ValueError:
+            product.current_price = None
+    else:
+        product.current_price = None
 
-    # Store product data
-    price_info = get_price_details(product)
-    if product_name and price_info['price']:
-        products[product_name] = price_info
-# Output the dictionary
-print(products)
+    # Extract and process original price
+    original_price_text = get_product_data(html, 'span.price-component__compare--value')
+    if original_price_text:
+        try:
+            product.original_price = float(clean_data(original_price_text))
+        except ValueError:
+            product.original_price = None
+    else:
+        product.original_price = None
 
-# CSV file path
-csv_file_path = 'products_detailed.csv'
+    return asdict(product)
 
-# Writing to a CSV file
-with open(csv_file_path, mode='w', newline='') as file:
-    writer = csv.writer(file)
-    writer.writerow(['Product Name', 'Price Details', 'Status'])  # Column headers
-    for product, details in products.items():
-        writer.writerow([product, details['price'], details['status']])
+def export_to_csv(products):
+    fieldnames = [field.name for field in fields(Product)]
+    with open('products.csv', 'w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(products)
+    print("Data exported to CSV file.")
 
-print(f"CSV file has been created and saved as '{csv_file_path}'.")
+def append_to_csv(products):
+    fieldnames = [field.name for field in fields(Product)]
+    with open('products.csv', 'a', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writerows(products)
+    print("Data appended to CSV file.")
+
+def export_to_json(products):
+    with open('products.json', 'w',encoding='utf-8') as file:
+        json.dump(products, file, indent=4)
+    print("Data exported to JSON file.")
+
+def append_to_json(products):
+    with open('products.json', 'a',encoding='utf-8') as file:
+        json.dump(products, file, indent=4)
+    print("Data appended to JSON file.")
+
+def main():
+    URL = 'https://www.rei.com/c/camping-and-hiking/f/scd-deals'
+    products_urls = parse_pages_products_urls(URL)
+    products=[]
+
+    for product_url in products_urls:
+        #print("parsing product data :"+ product_url)
+        html = get_html(product_url)
+        product = parse_product_page(html)
+        #append_to_csv([product])
+        #append_to_json([product])
+        products.append(product)
+        #time.sleep(0.5)
+
+    export_to_csv(products)
+    export_to_json(products)
+    print("###########   Done parsing all products data   ###########")
+
+if __name__ == '__main__':  
+   main()
